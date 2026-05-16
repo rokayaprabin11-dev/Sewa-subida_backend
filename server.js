@@ -60,6 +60,26 @@ async function initDB() {
       created_at  TIMESTAMPTZ DEFAULT NOW()
     )
   `);
+  // ── NEW: arrivals table ────────────────────────────────────────────────────
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS arrivals (
+      id           SERIAL PRIMARY KEY,
+      name         TEXT        NOT NULL,
+      latin_name   TEXT,
+      cat          TEXT        NOT NULL DEFAULT 'indoor',
+      cat_label    TEXT,
+      badge        TEXT        DEFAULT 'new',
+      img_bg       TEXT        DEFAULT '',
+      emoji        TEXT        DEFAULT '🌿',
+      image        TEXT,
+      stars        INTEGER     DEFAULT 5,
+      review_count INTEGER     DEFAULT 0,
+      care_tags    JSONB       DEFAULT '[]',
+      popular      INTEGER     DEFAULT 50,
+      sort_order   INTEGER     DEFAULT 0,
+      created_at   TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
   console.log("✅ Tables ready");
 }
 
@@ -69,7 +89,7 @@ app.use(cors({
   methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
 }));
-app.options("*", cors()); 
+app.options("*", cors());
 app.use(express.json());
 
 // Multer — store file in memory before uploading to Cloudinary
@@ -116,13 +136,9 @@ app.get("/api/health", async (req, res) => {
 });
 
 // ─── IMAGE UPLOAD ─────────────────────────────────────────────────────────────
-// POST /api/upload  — admin only, multipart/form-data, field name: "image"
-// Returns: { url: "https://res.cloudinary.com/..." }
 app.post("/api/upload", requireAuth, upload.single("image"), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: "No image file provided" });
-
   try {
-    // Upload buffer to Cloudinary via stream
     const result = await new Promise((resolve, reject) => {
       const stream = cloudinary.uploader.upload_stream(
         {
@@ -133,13 +149,7 @@ app.post("/api/upload", requireAuth, upload.single("image"), async (req, res) =>
       );
       streamifier.createReadStream(req.file.buffer).pipe(stream);
     });
-
-    res.json({
-      url:       result.secure_url,
-      public_id: result.public_id,
-      width:     result.width,
-      height:    result.height,
-    });
+    res.json({ url: result.secure_url, public_id: result.public_id, width: result.width, height: result.height });
   } catch (e) {
     console.error("Cloudinary upload error:", e);
     res.status(500).json({ error: "Image upload failed: " + e.message });
@@ -149,138 +159,164 @@ app.post("/api/upload", requireAuth, upload.single("image"), async (req, res) =>
 // ─── GALLERY ──────────────────────────────────────────────────────────────────
 app.get("/api/gallery", async (req, res) => {
   try {
-    const { rows } = await pool.query(
-      "SELECT * FROM gallery ORDER BY sort_order ASC, id ASC"
-    );
+    const { rows } = await pool.query("SELECT * FROM gallery ORDER BY sort_order ASC, id ASC");
     res.json(rows);
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
-  }
+  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
 app.post("/api/gallery", requireAuth, async (req, res) => {
   const { title, cat, description, service, duration, location, budget, height, bg, image, sort_order } = req.body || {};
   try {
     const { rows } = await pool.query(
-      `INSERT INTO gallery
-        (title, cat, description, service, duration, location, budget, height, bg, image, sort_order)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-       RETURNING *`,
-      [title, cat || "modern", description, service, duration, location, budget,
-       parseInt(height) || 180, bg, image, sort_order ?? 0]
+      `INSERT INTO gallery (title,cat,description,service,duration,location,budget,height,bg,image,sort_order)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+      [title, cat||"modern", description, service, duration, location, budget,
+       parseInt(height)||180, bg, image, sort_order??0]
     );
     res.status(201).json(rows[0]);
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
-  }
+  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
 app.patch("/api/gallery/:id", requireAuth, async (req, res) => {
   const { id } = req.params;
   const fields  = req.body || {};
-  const allowed = ["title","cat","description","service","duration",
-                   "location","budget","height","bg","image","sort_order"];
+  const allowed = ["title","cat","description","service","duration","location","budget","height","bg","image","sort_order"];
   const updates = Object.keys(fields).filter(k => allowed.includes(k));
   if (updates.length === 0) return res.status(400).json({ error: "No valid fields" });
-
-  const setClauses = updates.map((k, i) => `${k} = $${i + 1}`).join(", ");
-  const values     = updates.map(k => k === "height" ? parseInt(fields[k]) || 180 : fields[k]);
+  const setClauses = updates.map((k, i) => `${k} = $${i+1}`).join(", ");
+  const values     = updates.map(k => k==="height" ? parseInt(fields[k])||180 : fields[k]);
   values.push(id);
-
   try {
-    const { rows } = await pool.query(
-      `UPDATE gallery SET ${setClauses} WHERE id = $${values.length} RETURNING *`,
-      values
-    );
-    if (rows.length === 0) return res.status(404).json({ error: "Not found" });
+    const { rows } = await pool.query(`UPDATE gallery SET ${setClauses} WHERE id=$${values.length} RETURNING *`, values);
+    if (rows.length===0) return res.status(404).json({ error: "Not found" });
     res.json(rows[0]);
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
-  }
+  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
 app.delete("/api/gallery/:id", requireAuth, async (req, res) => {
-  try {
-    await pool.query("DELETE FROM gallery WHERE id = $1", [req.params.id]);
-    res.status(204).end();
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
-  }
+  try { await pool.query("DELETE FROM gallery WHERE id=$1", [req.params.id]); res.status(204).end(); }
+  catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
 // ─── PRICING ──────────────────────────────────────────────────────────────────
 app.get("/api/pricing", async (req, res) => {
   try {
-    const { rows } = await pool.query(
-      "SELECT * FROM pricing ORDER BY sort_order ASC, id ASC"
-    );
+    const { rows } = await pool.query("SELECT * FROM pricing ORDER BY sort_order ASC, id ASC");
     res.json(rows);
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
-  }
+  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
 app.post("/api/pricing", requireAuth, async (req, res) => {
   const { name, icon, description, price, period, note, popular, cta_style, features, sort_order } = req.body || {};
   try {
     const { rows } = await pool.query(
-      `INSERT INTO pricing
-        (name, icon, description, price, period, note, popular, cta_style, features, sort_order)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-       RETURNING *`,
-      [name, icon, description, price, period, note,
-       popular ?? false, cta_style ?? "outline",
-       JSON.stringify(features ?? []), sort_order ?? 0]
+      `INSERT INTO pricing (name,icon,description,price,period,note,popular,cta_style,features,sort_order)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+      [name, icon, description, price, period, note, popular??false, cta_style??"outline", JSON.stringify(features??[]), sort_order??0]
     );
     res.status(201).json(rows[0]);
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
-  }
+  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
 app.patch("/api/pricing/:id", requireAuth, async (req, res) => {
   const { id } = req.params;
   const fields  = req.body || {};
-  const allowed = ["name","icon","description","price","period",
-                   "note","popular","cta_style","features","sort_order"];
+  const allowed = ["name","icon","description","price","period","note","popular","cta_style","features","sort_order"];
+  const updates = Object.keys(fields).filter(k => allowed.includes(k));
+  if (updates.length === 0) return res.status(400).json({ error: "No valid fields" });
+  const setClauses = updates.map((k,i) => k==="features" ? `${k}=$${i+1}::jsonb` : `${k}=$${i+1}`).join(", ");
+  const values = updates.map(k => k==="features" ? JSON.stringify(fields[k]) : fields[k]);
+  values.push(id);
+  try {
+    const { rows } = await pool.query(`UPDATE pricing SET ${setClauses} WHERE id=$${values.length} RETURNING *`, values);
+    if (rows.length===0) return res.status(404).json({ error: "Not found" });
+    res.json(rows[0]);
+  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
+});
+
+app.delete("/api/pricing/:id", requireAuth, async (req, res) => {
+  try { await pool.query("DELETE FROM pricing WHERE id=$1", [req.params.id]); res.status(204).end(); }
+  catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
+});
+
+// ─── ARRIVALS ─────────────────────────────────────────────────────────────────
+// GET /api/arrivals — public
+app.get("/api/arrivals", async (req, res) => {
+  try {
+    const { rows } = await pool.query("SELECT * FROM arrivals ORDER BY sort_order ASC, id ASC");
+    res.json(rows);
+  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/arrivals — admin only
+app.post("/api/arrivals", requireAuth, async (req, res) => {
+  const {
+    name, latin_name, cat, cat_label, badge, img_bg, emoji,
+    image, stars, review_count, care_tags, popular, sort_order,
+  } = req.body || {};
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO arrivals
+        (name, latin_name, cat, cat_label, badge, img_bg, emoji, image,
+         stars, review_count, care_tags, popular, sort_order)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+       RETURNING *`,
+      [
+        name,
+        latin_name || null,
+        cat || "indoor",
+        cat_label || null,
+        badge || "new",
+        img_bg || "",
+        emoji || "🌿",
+        image || null,
+        parseInt(stars) || 5,
+        parseInt(review_count) || 0,
+        JSON.stringify(care_tags ?? []),
+        parseInt(popular) || 50,
+        sort_order ?? 0,
+      ]
+    );
+    res.status(201).json(rows[0]);
+  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
+});
+
+// PATCH /api/arrivals/:id — admin only
+app.patch("/api/arrivals/:id", requireAuth, async (req, res) => {
+  const { id }  = req.params;
+  const fields  = req.body || {};
+  const allowed = [
+    "name","latin_name","cat","cat_label","badge","img_bg","emoji",
+    "image","stars","review_count","care_tags","popular","sort_order",
+  ];
   const updates = Object.keys(fields).filter(k => allowed.includes(k));
   if (updates.length === 0) return res.status(400).json({ error: "No valid fields" });
 
   const setClauses = updates.map((k, i) =>
-    k === "features" ? `${k} = $${i + 1}::jsonb` : `${k} = $${i + 1}`
+    k === "care_tags" ? `${k}=$${i+1}::jsonb` : `${k}=$${i+1}`
   ).join(", ");
-  const values = updates.map(k =>
-    k === "features" ? JSON.stringify(fields[k]) : fields[k]
-  );
+  const values = updates.map(k => {
+    if (k === "care_tags") return JSON.stringify(fields[k]);
+    if (["stars","review_count","popular","sort_order"].includes(k))
+      return fields[k] !== null && fields[k] !== "" ? parseInt(fields[k]) : null;
+    return fields[k];
+  });
   values.push(id);
 
   try {
     const { rows } = await pool.query(
-      `UPDATE pricing SET ${setClauses} WHERE id = $${values.length} RETURNING *`,
+      `UPDATE arrivals SET ${setClauses} WHERE id=$${values.length} RETURNING *`,
       values
     );
     if (rows.length === 0) return res.status(404).json({ error: "Not found" });
     res.json(rows[0]);
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
-  }
+  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
-app.delete("/api/pricing/:id", requireAuth, async (req, res) => {
-  try {
-    await pool.query("DELETE FROM pricing WHERE id = $1", [req.params.id]);
-    res.status(204).end();
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
-  }
+// DELETE /api/arrivals/:id — admin only
+app.delete("/api/arrivals/:id", requireAuth, async (req, res) => {
+  try { await pool.query("DELETE FROM arrivals WHERE id=$1", [req.params.id]); res.status(204).end(); }
+  catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
 // ─── START ────────────────────────────────────────────────────────────────────
