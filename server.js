@@ -1,21 +1,10 @@
-// server.js — GreenScape API
-// Routes consumed by admin.html:
-//   POST   /api/login
-//   GET    /api/gallery
-//   POST   /api/gallery
-//   PATCH  /api/gallery/:id
-//   DELETE /api/gallery/:id
-//   GET    /api/pricing
-//   POST   /api/pricing
-//   PATCH  /api/pricing/:id
-//   DELETE /api/pricing/:id
-
+// server.js — GreenScape API (PostgreSQL)
 require("dotenv").config();
 
-const express = require("express");
-const cors    = require("cors");
-const jwt     = require("jsonwebtoken");
-const { Pool } = require("pg");
+const express    = require("express");
+const cors       = require("cors");
+const jwt        = require("jsonwebtoken");
+const { Pool }   = require("pg");
 
 const app  = express();
 const PORT = process.env.PORT || 8080;
@@ -23,26 +12,61 @@ const PORT = process.env.PORT || 8080;
 // ─── DATABASE ─────────────────────────────────────────────────────────────────
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }, // required for Railway
+  ssl: { rejectUnauthorized: false },
 });
+
+// ─── AUTO-CREATE TABLES ON STARTUP ───────────────────────────────────────────
+async function initDB() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS gallery (
+      id          SERIAL PRIMARY KEY,
+      title       TEXT        NOT NULL,
+      cat         TEXT        NOT NULL DEFAULT 'modern',
+      description TEXT,
+      service     TEXT,
+      duration    TEXT,
+      location    TEXT,
+      budget      TEXT,
+      height      INTEGER     DEFAULT 180,
+      bg          TEXT,
+      image       TEXT,
+      sort_order  INTEGER     DEFAULT 0,
+      created_at  TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS pricing (
+      id          SERIAL PRIMARY KEY,
+      name        TEXT        NOT NULL,
+      icon        TEXT        DEFAULT 'fa-leaf',
+      description TEXT,
+      price       TEXT,
+      period      TEXT        DEFAULT '/month',
+      note        TEXT,
+      popular     BOOLEAN     DEFAULT FALSE,
+      cta_style   TEXT        DEFAULT 'outline',
+      features    JSONB       DEFAULT '[]',
+      sort_order  INTEGER     DEFAULT 0,
+      created_at  TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  console.log("✅ Tables ready");
+}
 
 // ─── MIDDLEWARE ───────────────────────────────────────────────────────────────
 app.use(cors({
-  origin: "*", // tighten this to your domain after deployment
+  origin: "*",
   methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
 }));
 app.use(express.json());
 
-// ─── AUTH MIDDLEWARE ──────────────────────────────────────────────────────────
+// ─── AUTH ─────────────────────────────────────────────────────────────────────
 function requireAuth(req, res, next) {
-  const header = req.headers.authorization;
-  if (!header || !header.startsWith("Bearer ")) {
-    return res.status(401).json({ error: "Missing token" });
-  }
-  const token = header.slice(7);
+  const header = req.headers.authorization || "";
+  if (!header.startsWith("Bearer ")) return res.status(401).json({ error: "Missing token" });
   try {
-    req.admin = jwt.verify(token, process.env.JWT_SECRET);
+    req.admin = jwt.verify(header.slice(7), process.env.JWT_SECRET);
     next();
   } catch {
     return res.status(401).json({ error: "Invalid or expired token" });
@@ -50,9 +74,8 @@ function requireAuth(req, res, next) {
 }
 
 // ─── LOGIN ────────────────────────────────────────────────────────────────────
-// POST /api/login  { password }  → { token }
 app.post("/api/login", (req, res) => {
-  const { password } = req.body;
+  const { password } = req.body || {};
   if (!password || password !== process.env.ADMIN_PASSWORD) {
     return res.status(401).json({ error: "Incorrect password" });
   }
@@ -60,9 +83,17 @@ app.post("/api/login", (req, res) => {
   res.json({ token });
 });
 
-// ─── GALLERY ──────────────────────────────────────────────────────────────────
+// ─── HEALTH ───────────────────────────────────────────────────────────────────
+app.get("/api/health", async (req, res) => {
+  try {
+    await pool.query("SELECT 1");
+    res.json({ status: "ok", db: "connected" });
+  } catch (e) {
+    res.status(500).json({ status: "error", db: e.message });
+  }
+});
 
-// GET /api/gallery  — public (portfolio.html reads this)
+// ─── GALLERY ──────────────────────────────────────────────────────────────────
 app.get("/api/gallery", async (req, res) => {
   try {
     const { rows } = await pool.query(
@@ -75,15 +106,19 @@ app.get("/api/gallery", async (req, res) => {
   }
 });
 
-// POST /api/gallery  — admin only
 app.post("/api/gallery", requireAuth, async (req, res) => {
-  const { title, cat, description, service, duration, location, budget, height, bg, image, sort_order } = req.body;
+  const {
+    title, cat, description, service, duration,
+    location, budget, height, bg, image, sort_order,
+  } = req.body || {};
   try {
     const { rows } = await pool.query(
-      `INSERT INTO gallery (title, cat, description, service, duration, location, budget, height, bg, image, sort_order)
+      `INSERT INTO gallery
+        (title, cat, description, service, duration, location, budget, height, bg, image, sort_order)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
        RETURNING *`,
-      [title, cat, description, service, duration, location, budget, height, bg, image, sort_order ?? 0]
+      [title, cat, description, service, duration, location, budget,
+       parseInt(height) || 180, bg, image, sort_order ?? 0]
     );
     res.status(201).json(rows[0]);
   } catch (e) {
@@ -92,16 +127,16 @@ app.post("/api/gallery", requireAuth, async (req, res) => {
   }
 });
 
-// PATCH /api/gallery/:id  — admin only
 app.patch("/api/gallery/:id", requireAuth, async (req, res) => {
   const { id } = req.params;
-  const fields = req.body;
-  const allowed = ["title", "cat", "description", "service", "duration", "location", "budget", "height", "bg", "image", "sort_order"];
+  const fields  = req.body || {};
+  const allowed = ["title","cat","description","service","duration",
+                   "location","budget","height","bg","image","sort_order"];
   const updates = Object.keys(fields).filter(k => allowed.includes(k));
-  if (updates.length === 0) return res.status(400).json({ error: "No valid fields to update" });
+  if (updates.length === 0) return res.status(400).json({ error: "No valid fields" });
 
   const setClauses = updates.map((k, i) => `${k} = $${i + 1}`).join(", ");
-  const values     = updates.map(k => fields[k]);
+  const values     = updates.map(k => k === "height" ? parseInt(fields[k]) || 180 : fields[k]);
   values.push(id);
 
   try {
@@ -117,7 +152,6 @@ app.patch("/api/gallery/:id", requireAuth, async (req, res) => {
   }
 });
 
-// DELETE /api/gallery/:id  — admin only
 app.delete("/api/gallery/:id", requireAuth, async (req, res) => {
   try {
     await pool.query("DELETE FROM gallery WHERE id = $1", [req.params.id]);
@@ -129,8 +163,6 @@ app.delete("/api/gallery/:id", requireAuth, async (req, res) => {
 });
 
 // ─── PRICING ──────────────────────────────────────────────────────────────────
-
-// GET /api/pricing  — public (services.html reads this)
 app.get("/api/pricing", async (req, res) => {
   try {
     const { rows } = await pool.query(
@@ -143,15 +175,20 @@ app.get("/api/pricing", async (req, res) => {
   }
 });
 
-// POST /api/pricing  — admin only
 app.post("/api/pricing", requireAuth, async (req, res) => {
-  const { name, icon, description, price, period, note, popular, cta_style, features, sort_order } = req.body;
+  const {
+    name, icon, description, price, period,
+    note, popular, cta_style, features, sort_order,
+  } = req.body || {};
   try {
     const { rows } = await pool.query(
-      `INSERT INTO pricing (name, icon, description, price, period, note, popular, cta_style, features, sort_order)
+      `INSERT INTO pricing
+        (name, icon, description, price, period, note, popular, cta_style, features, sort_order)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
        RETURNING *`,
-      [name, icon, description, price, period, note, popular ?? false, cta_style ?? "outline", JSON.stringify(features ?? []), sort_order ?? 0]
+      [name, icon, description, price, period, note,
+       popular ?? false, cta_style ?? "outline",
+       JSON.stringify(features ?? []), sort_order ?? 0]
     );
     res.status(201).json(rows[0]);
   } catch (e) {
@@ -160,19 +197,20 @@ app.post("/api/pricing", requireAuth, async (req, res) => {
   }
 });
 
-// PATCH /api/pricing/:id  — admin only
 app.patch("/api/pricing/:id", requireAuth, async (req, res) => {
   const { id } = req.params;
-  const fields  = req.body;
-  const allowed = ["name", "icon", "description", "price", "period", "note", "popular", "cta_style", "features", "sort_order"];
+  const fields  = req.body || {};
+  const allowed = ["name","icon","description","price","period",
+                   "note","popular","cta_style","features","sort_order"];
   const updates = Object.keys(fields).filter(k => allowed.includes(k));
-  if (updates.length === 0) return res.status(400).json({ error: "No valid fields to update" });
+  if (updates.length === 0) return res.status(400).json({ error: "No valid fields" });
 
-  const setClauses = updates.map((k, i) => {
-    // Cast features to JSONB explicitly
-    return k === "features" ? `${k} = $${i + 1}::jsonb` : `${k} = $${i + 1}`;
-  }).join(", ");
-  const values = updates.map(k => k === "features" ? JSON.stringify(fields[k]) : fields[k]);
+  const setClauses = updates.map((k, i) =>
+    k === "features" ? `${k} = $${i + 1}::jsonb` : `${k} = $${i + 1}`
+  ).join(", ");
+  const values = updates.map(k =>
+    k === "features" ? JSON.stringify(fields[k]) : fields[k]
+  );
   values.push(id);
 
   try {
@@ -188,7 +226,6 @@ app.patch("/api/pricing/:id", requireAuth, async (req, res) => {
   }
 });
 
-// DELETE /api/pricing/:id  — admin only
 app.delete("/api/pricing/:id", requireAuth, async (req, res) => {
   try {
     await pool.query("DELETE FROM pricing WHERE id = $1", [req.params.id]);
@@ -199,18 +236,9 @@ app.delete("/api/pricing/:id", requireAuth, async (req, res) => {
   }
 });
 
-// ─── HEALTH CHECK ─────────────────────────────────────────────────────────────
-app.get("/api/health", async (req, res) => {
-  try {
-    await pool.query("SELECT 1");
-    res.json({ status: "ok", db: "connected" });
-  } catch (e) {
-    res.status(500).json({ status: "error", db: e.message });
-  }
-});
-
 // ─── START ────────────────────────────────────────────────────────────────────
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
+  await initDB();
   console.log(`✅ GreenScape API running on http://localhost:${PORT}`);
   console.log(`   DB: ${process.env.DATABASE_URL?.slice(0, 40)}...`);
 });
