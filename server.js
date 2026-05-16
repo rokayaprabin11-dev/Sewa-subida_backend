@@ -1,13 +1,23 @@
-// server.js — GreenScape API (PostgreSQL)
+// server.js — GreenScape API (PostgreSQL + Cloudinary)
 require("dotenv").config();
 
-const express    = require("express");
-const cors       = require("cors");
-const jwt        = require("jsonwebtoken");
-const { Pool }   = require("pg");
+const express        = require("express");
+const cors           = require("cors");
+const jwt            = require("jsonwebtoken");
+const { Pool }       = require("pg");
+const multer         = require("multer");
+const cloudinary     = require("cloudinary").v2;
+const streamifier    = require("streamifier");
 
 const app  = express();
 const PORT = process.env.PORT || 8080;
+
+// ─── CLOUDINARY CONFIG ────────────────────────────────────────────────────────
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key:    process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
 
 // ─── DATABASE ─────────────────────────────────────────────────────────────────
 const pool = new Pool({
@@ -61,6 +71,17 @@ app.use(cors({
 }));
 app.use(express.json());
 
+// Multer — store file in memory before uploading to Cloudinary
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB max
+  fileFilter: (req, file, cb) => {
+    const allowed = ["image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif"];
+    if (allowed.includes(file.mimetype)) cb(null, true);
+    else cb(new Error("Only image files are allowed (jpg, png, webp, gif)"));
+  },
+});
+
 // ─── AUTH ─────────────────────────────────────────────────────────────────────
 function requireAuth(req, res, next) {
   const header = req.headers.authorization || "";
@@ -93,6 +114,37 @@ app.get("/api/health", async (req, res) => {
   }
 });
 
+// ─── IMAGE UPLOAD ─────────────────────────────────────────────────────────────
+// POST /api/upload  — admin only, multipart/form-data, field name: "image"
+// Returns: { url: "https://res.cloudinary.com/..." }
+app.post("/api/upload", requireAuth, upload.single("image"), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "No image file provided" });
+
+  try {
+    // Upload buffer to Cloudinary via stream
+    const result = await new Promise((resolve, reject) => {
+      const stream = cloudinary.uploader.upload_stream(
+        {
+          folder:         "greenscape",
+          transformation: [{ width: 1200, height: 900, crop: "limit", quality: "auto", fetch_format: "auto" }],
+        },
+        (error, result) => { if (error) reject(error); else resolve(result); }
+      );
+      streamifier.createReadStream(req.file.buffer).pipe(stream);
+    });
+
+    res.json({
+      url:       result.secure_url,
+      public_id: result.public_id,
+      width:     result.width,
+      height:    result.height,
+    });
+  } catch (e) {
+    console.error("Cloudinary upload error:", e);
+    res.status(500).json({ error: "Image upload failed: " + e.message });
+  }
+});
+
 // ─── GALLERY ──────────────────────────────────────────────────────────────────
 app.get("/api/gallery", async (req, res) => {
   try {
@@ -107,17 +159,14 @@ app.get("/api/gallery", async (req, res) => {
 });
 
 app.post("/api/gallery", requireAuth, async (req, res) => {
-  const {
-    title, cat, description, service, duration,
-    location, budget, height, bg, image, sort_order,
-  } = req.body || {};
+  const { title, cat, description, service, duration, location, budget, height, bg, image, sort_order } = req.body || {};
   try {
     const { rows } = await pool.query(
       `INSERT INTO gallery
         (title, cat, description, service, duration, location, budget, height, bg, image, sort_order)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
        RETURNING *`,
-      [title, cat, description, service, duration, location, budget,
+      [title, cat || "modern", description, service, duration, location, budget,
        parseInt(height) || 180, bg, image, sort_order ?? 0]
     );
     res.status(201).json(rows[0]);
@@ -176,10 +225,7 @@ app.get("/api/pricing", async (req, res) => {
 });
 
 app.post("/api/pricing", requireAuth, async (req, res) => {
-  const {
-    name, icon, description, price, period,
-    note, popular, cta_style, features, sort_order,
-  } = req.body || {};
+  const { name, icon, description, price, period, note, popular, cta_style, features, sort_order } = req.body || {};
   try {
     const { rows } = await pool.query(
       `INSERT INTO pricing
@@ -240,5 +286,5 @@ app.delete("/api/pricing/:id", requireAuth, async (req, res) => {
 app.listen(PORT, async () => {
   await initDB();
   console.log(`✅ GreenScape API running on http://localhost:${PORT}`);
-  console.log(`   DB: ${process.env.DATABASE_URL?.slice(0, 40)}...`);
+  console.log(`   Cloudinary: ${process.env.CLOUDINARY_CLOUD_NAME || "NOT SET"}`);
 });
